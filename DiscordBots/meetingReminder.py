@@ -16,13 +16,13 @@ BOT_PREFIX = "!"
 client = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
 # --- Reminder Storage ---
-# Added 'confirmed_users' list to track who sent !ok
 REMINDERS_LIST = [] 
 
 # Global timezone for all reminders 
 TIMEZONE_STR = 'Asia/Dhaka' 
 BOT_TZ = pytz.timezone(TIMEZONE_STR)
-REMINDER_INTERVALS = [15, 10, 5, 0] # Reminder times in minutes before the meeting
+# Updated reminder times in minutes before the meeting
+REMINDER_INTERVALS = [15, 10, 2, 0] 
 
 # ----------------------------------------------------------------------
 # 2. Discord Events and Tasks
@@ -33,19 +33,19 @@ async def on_ready():
     print(f'Bot is ready and logged in as {client.user}')
     print(f'Using Timezone: {TIMEZONE_STR}')
     reminder_checker.start()
+    # Updated help message to reflect 12hr time format
     await client.change_presence(activity=discord.Game(name=f'{BOT_PREFIX}schedule | {BOT_PREFIX}ok'))
 
 # --- Scheduled Reminder Checker ---
 
 @tasks.loop(minutes=1) 
 async def reminder_checker():
-    # Get current time, rounded down to the minute
     now = datetime.datetime.now(BOT_TZ).replace(second=0, microsecond=0)
-    
     reminders_to_remove = []
 
     for reminder in REMINDERS_LIST:
         meeting_time = reminder['time']
+        # Time remaining in minutes, rounded down
         time_difference = int((meeting_time - now).total_seconds() / 60)
         
         channel = client.get_channel(reminder['channel_id'])
@@ -65,50 +65,24 @@ async def reminder_checker():
             await channel.send(message)
             continue
             
-        # --- 2. Handle 15, 10, 5 Minute Reminders ---
+        # --- 2. Handle 15, 10, 2 Minute Reminders ---
         if time_difference in REMINDER_INTERVALS:
             
-            # Identify users who have NOT confirmed and should receive this reminder
-            unconfirmed_users = [
-                uid for uid in reminder['users'] 
-                if uid not in reminder.get('confirmed_users', [])
-            ]
-            
-            # If a user confirmed at 15 minutes, they should skip 10 minutes, but receive 5 minutes.
-            # This logic must check the time the user sent !ok vs. the current reminder time.
-            
-            # Check the confirmed time for each user
             users_to_remind = []
             
             for user_id in reminder['users']:
                 
-                # If they never confirmed, send the message
-                if user_id not in reminder.get('confirmed_users', {}):
+                # Users who confirmed are stored in the dictionary
+                is_confirmed = user_id in reminder.get('confirmed_users', {})
+                
+                if not is_confirmed:
+                    # If user has NOT confirmed, they get all 15, 10, and 2 min reminders
                     users_to_remind.append(user_id)
-                    continue
                 
-                # Check when they confirmed
-                confirmed_time = reminder['confirmed_users'][user_id]
-                
-                # Logic:
-                # - If time is 15 or 10 min, AND they confirmed before 15 min, skip them.
-                # - If time is 5 min, AND they confirmed after the 15 min check (i.e., at 14-6 min), skip them.
-                
-                if time_difference == 15:
-                    users_to_remind.append(user_id) # 15 min reminder always goes out first
-                
-                elif time_difference == 10:
-                    # User confirms BEFORE 15 min (e.g., at 16 min) -> skip 15 & 10, receive 5.
-                    if confirmed_time > meeting_time - datetime.timedelta(minutes=15):
-                         users_to_remind.append(user_id) # Did NOT confirm early enough
-                    # else: skip (confirmed early)
-                    
-                elif time_difference == 5:
-                    # User confirms AFTER 15 min notification (e.g., at 14 min) -> skip 10 & 5.
-                    if confirmed_time < meeting_time - datetime.timedelta(minutes=15):
-                        users_to_remind.append(user_id) # Confirmed too early (skip 15 & 10, receive 5)
-                    # else: skip (confirmed late enough to skip 5 min)
-                    
+                elif time_difference == 2:
+                    # If user HAS confirmed, they ONLY get the 2-minute reminder
+                    users_to_remind.append(user_id)
+            
             
             if users_to_remind:
                 mentions = " ".join([f"<@{uid}>" for uid in users_to_remind])
@@ -118,9 +92,9 @@ async def reminder_checker():
                     f"⏰ **MEETING REMINDER!** 📢\n"
                     f"{mentions}, you have a meeting scheduled by {client.get_user(reminder['scheduler_id']).mention}:\n"
                     f"**Topic:** {reminder['message']}\n"
-                    f"**Time:** {meeting_time.strftime('%Y-%m-%d %H:%M %Z')}\n"
+                    f"**Time:** {meeting_time.strftime('%Y-%m-%d %I:%M %p %Z')}\n" # 12hr format in reminder
                     f"{final_time_msg}\n"
-                    f"Reply with `!ok` to silence this meeting's next reminder."
+                    f"Reply with `!ok` to silence the next reminder."
                 )
                 await channel.send(message)
 
@@ -137,23 +111,25 @@ async def reminder_checker():
 # 3. Command Logic
 # ----------------------------------------------------------------------
 
-# --- !SCHEDULE command (Modified to initialize confirmed_users) ---
-@client.command(name='schedule', help='Schedule a meeting reminder. Format: !schedule "<YYYY-MM-DD HH:MM>" <@user1 @user2...> <Meeting Topic>')
+# --- !SCHEDULE command (MODIFIED: Date/Time parsing) ---
+@client.command(name='schedule', help='Schedule a meeting reminder. Format: !schedule "<YYYY-MM-DD HH:MM AM/PM>" <@user1 @user2...> <Meeting Topic>')
 async def schedule_meeting(ctx, date_time_str: str, *args):
     scheduler_id = ctx.author.id
     
-    # ... (Date/Time parsing and validation logic is unchanged)
+    # 1. Parse Date and Time (Uses 12-hour format: %I:%M %p)
     try:
-        naive_dt = datetime.datetime.strptime(date_time_str, '%Y-%m-%d %H:%M')
+        # Example format: "2025-12-31 02:30 PM"
+        naive_dt = datetime.datetime.strptime(date_time_str, '%Y-%m-%d %I:%M %p')
         meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
     except ValueError:
-        return await ctx.send(f"❌ **Error:** Invalid date/time format. Use `\"YYYY-MM-DD HH:MM\"`. Example: `{BOT_PREFIX}schedule \"2025-12-31 14:30\" @user Team Sync`")
+        return await ctx.send(f"❌ **Error:** Invalid date/time format. Use `\"YYYY-MM-DD HH:MM AM/PM\"`. Example: `{BOT_PREFIX}schedule \"2025-12-31 02:30 PM\" @user Team Sync`")
 
+    # 2. Check if the meeting is in the past
     now = datetime.datetime.now(BOT_TZ).replace(second=0, microsecond=0)
     if meeting_time < now + datetime.timedelta(minutes=1):
         return await ctx.send("❌ **Error:** Cannot schedule a meeting in the past or immediately. Please choose a future time.")
 
-    # ... (Mention parsing logic is unchanged)
+    # 3. Separate Mentions from the Message Topic (Unchanged)
     mentioned_ids = []
     message_parts = []
     
@@ -176,7 +152,7 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
     elif not mentioned_ids:
         return await ctx.send("❌ **Error:** Please mention at least one other user for the meeting, or include a topic.")
 
-    # 4. Store the new reminder (MODIFIED: added confirmed_users dictionary)
+    # 4. Store the new reminder
     new_reminder = {
         'time': meeting_time,
         'users': mentioned_ids,
@@ -187,34 +163,33 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
     }
     REMINDERS_LIST.append(new_reminder)
     
-    # ... (Confirmation message logic is unchanged)
+    # 5. Confirmation Message (Updated to show 12hr time)
     user_mentions_str = " ".join([f"<@{uid}>" for uid in mentioned_ids])
     
     confirmation_message = (
         f"✅ **Reminder Set!**\n"
         f"**Topic:** {meeting_topic}\n"
-        f"**Time:** {meeting_time.strftime('%Y-%m-%d %H:%M %Z')}\n"
+        f"**Time:** {meeting_time.strftime('%Y-%m-%d %I:%M %p %Z')}\n"
         f"**Participants:** {user_mentions_str}\n"
-        f"Reminders will be sent at 15, 10, and 5 minutes. Use `!ok` to silence the next reminder."
+        f"Reminders will be sent at 15, 10, and 2 minutes. Use `!ok` to skip 15/10 min reminders."
     )
     await ctx.send(confirmation_message)
 
-# --- NEW !OK Command ---
+# --- !OK Command (MODIFIED: Simplified logic for 2-minute jump) ---
 @client.command(name='ok', help='Acknowledges the meeting reminder to silence the next notification.')
 async def confirm_meeting(ctx):
     user_id = ctx.author.id
     now = datetime.datetime.now(BOT_TZ)
     
-    # 1. Find the MOST RECENT meeting that the user is attending and is NOT YET started.
+    # 1. Find the NEXT meeting the user is attending and is NOT YET started.
     relevant_reminders = sorted([
         r for r in REMINDERS_LIST 
         if user_id in r['users'] and r['time'] > now
-    ], key=lambda r: r['time']) # Sort by earliest meeting first
+    ], key=lambda r: r['time']) 
 
     if not relevant_reminders:
         return await ctx.send("ℹ️ You have no active meetings scheduled to confirm.")
 
-    # Use the next meeting (the first one in the sorted list)
     reminder = relevant_reminders[0]
     
     # Check if the user has already confirmed the next reminder
@@ -224,38 +199,35 @@ async def confirm_meeting(ctx):
     # 2. Update the reminder status
     reminder['confirmed_users'][user_id] = now
     
-    # 3. Determine which reminder(s) will be skipped
-    
-    meeting_time = reminder['time']
-    minutes_until_meeting = int((meeting_time - now).total_seconds() / 60)
+    # 3. Determine skip message based on current time
+    minutes_until_meeting = int((reminder['time'] - now).total_seconds() / 60)
     
     skip_message = ""
     
-    # Logic to confirm skipped reminders based on minutes_until_meeting:
     if minutes_until_meeting > 15:
-        # User confirmed very early (e.g., 20 min before). Skip 15 & 10, receive 5.
+        # Confirmed before 15 min reminder. Skip 15 & 10.
         skip_message = "You will skip the **15-minute and 10-minute** reminders."
     elif minutes_until_meeting > 10:
-        # User confirmed between 15 and 10 min (e.g., 12 min before). Skip 10, receive 5.
+        # Confirmed after 15 min, before 10 min. Skip 10.
         skip_message = "You will skip the **10-minute** reminder."
-    elif minutes_until_meeting > 5:
-        # User confirmed between 10 and 5 min (e.g., 7 min before). Skip 5.
-        skip_message = "You will skip the **5-minute** reminder."
+    elif minutes_until_meeting > 2:
+        # Confirmed after 10 min, before 2 min. Skip none of the current intervals, but confirm.
+        skip_message = "You have confirmed the next reminders. You will only receive the **2-minute** reminder."
     else:
-        # User confirmed less than 5 min before. Only the "NOW" reminder remains.
+        # Confirmed between 2 min and NOW. Only the "NOW" reminder remains.
         skip_message = "Only the **'Meeting is NOW'** reminder will be sent to you."
 
 
     # 4. Send Confirmation
     await ctx.send(
         f"✅ **Confirmation Received!**\n"
-        f"For meeting **'{reminder['message']}'** at `{meeting_time.strftime('%H:%M %Z')}`.\n"
+        f"For meeting **'{reminder['message']}'** at `{reminder['time'].strftime('%I:%M %p %Z')}`.\n"
         f"{skip_message}\n"
         f"You will still receive the final **'Meeting is NOW'** reminder."
     )
 
 
-# --- !LIST command (Unchanged) ---
+# --- !LIST command (Unchanged, time format updated) ---
 @client.command(name='list', help='Lists all currently scheduled meeting reminders by you.')
 async def list_meetings(ctx):
     user_id = ctx.author.id
@@ -270,17 +242,15 @@ async def list_meetings(ctx):
     for i, reminder in enumerate(user_reminders):
         temp_id = i + 1
         
-        # Get the list of attendees 
         attendees = [uid for uid in reminder['users'] if uid != user_id]
         attendee_mentions = " ".join([f"<@{uid}>" for uid in attendees])
         
-        # Add confirmation status
         confirmed_count = len(reminder.get('confirmed_users', {}))
         status = f" ({confirmed_count}/{len(reminder['users'])} confirmed)"
         
         message += (
             f"**ID:** `{temp_id}` {status}\n"
-            f"**Time:** {reminder['time'].strftime('%Y-%m-%d %H:%M %Z')}\n"
+            f"**Time:** {reminder['time'].strftime('%Y-%m-%d %I:%M %p %Z')}\n" # 12hr format
             f"**Topic:** {reminder['message']}\n"
             f"**Attendees:** {attendee_mentions if attendees else 'Just you'}\n"
             f"---------------------------------\n"
@@ -313,7 +283,7 @@ async def cancel_meeting(ctx, meeting_id: int):
         await ctx.send(
             f"✅ **Meeting Cancelled!**\n"
             f"The meeting **'{reminder_to_remove['message']}'** scheduled for "
-            f"`{reminder_to_remove['time'].strftime('%Y-%m-%d %H:%M %Z')}` has been removed."
+            f"`{reminder_to_remove['time'].strftime('%Y-%m-%d %I:%M %p %Z')}` has been removed."
         )
     except ValueError:
         await ctx.send("❌ **Cancellation Error:** Could not find the meeting in the active list.")
@@ -322,12 +292,15 @@ async def cancel_meeting(ctx, meeting_id: int):
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         if ctx.command.name == 'schedule':
-            await ctx.send(f"❌ **Missing Arguments:** Please use the full format, remember to quote the date and time. Example: `{BOT_PREFIX}schedule \"2025-12-31 14:30\" @user Topic`")
+            await ctx.send(f"❌ **Missing Arguments:** Please use the full format, remember to quote the date and time. Example: `{BOT_PREFIX}schedule \"2025-12-31 02:30 PM\" @user Topic`")
         else:
             await ctx.send(f"❌ **Missing Arguments:** Please use the full format. Type `{BOT_PREFIX}help {ctx.command.name}` for usage.")
     elif isinstance(error, commands.CommandNotFound):
         pass
     else:
         print(f"An unexpected error occurred: {error}")
+
+
+
 # 4. Run the Bot
 client.run('Your bot token goes here')

@@ -1,6 +1,5 @@
 import discord
 import json
-import asyncio
 from datetime import datetime, time, timedelta, timezone
 
 # --- CONFIGURATION & DATA MANAGEMENT ---
@@ -9,14 +8,41 @@ from datetime import datetime, time, timedelta, timezone
 DATA_FILE = 'schedule_data.json'
 
 # Replace with your actual IDs (use strings for dictionary keys)
-# Format: "USER_ID": {"schedule": "HH:MM"} (24-hour time)
+# Format: "USER_ID": {"schedule": "HH:MM"} (24-hour time for internal calculation)
 SCHEDULED_USERS = {
-    "121exampleid1": {"schedule": "10:00"}, # User 1 expected online at 10:00 AM
-    "212exampleid2": {"schedule": "11:30"}, # User 2 expected online at 11:30 AM
-    "111exampleid3": {"schedule": "09:00"}  # User 3 expected online at 09:00 AM
+    "121exampleid1": {"schedule": "10:00"},
+    "212exampleid2": {"schedule": "11:30"},
+    "111exampleid3": {"schedule": "09:00"}
 }
 
 NOTIFICATION_CHANNEL_ID = channel_id_here # Replace with your channel ID
+
+# --- Utility Functions ---
+
+def format_elapsed_time(total_seconds):
+    """
+    Converts total seconds into a human-readable string (e.g., "1 hour and 15 minutes").
+    """
+    total_seconds = int(total_seconds)
+    if total_seconds < 60:
+        return f"{total_seconds} seconds"
+        
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    
+    parts = []
+    if hours > 0:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes > 0:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    
+    # Handle cases like "1 hour" and "1 hour and 15 minutes"
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    elif len(parts) == 1:
+        return parts[0]
+    else:
+        return "less than a minute" # Should be caught by the < 60 check, but safe fallback
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
@@ -25,7 +51,6 @@ intents.presences = True
 client = discord.Client(intents=intents)
 
 # Global dictionary to hold daily tracking data
-# Example: {'121exampleid1': {'last_reset_day': '2025-10-23', 'online_time': None, 'total_time_online': 0}}
 user_tracker = {}
 
 def load_data():
@@ -36,13 +61,12 @@ def load_data():
             user_tracker = json.load(f)
             print("Loaded tracking data.")
     except (FileNotFoundError, json.JSONDecodeError):
-        # Initialize with schedule data and required fields
         for user_id in SCHEDULED_USERS:
             user_tracker[user_id] = {
                 'last_reset_day': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-                'online_time_timestamp': None, # epoch time of the last time they came online
-                'total_time_online': 0,        # in seconds
-                'reported_today': False        # Flag for single daily report
+                'online_time_timestamp': None,
+                'total_time_online': 0,
+                'reported_today': False
             }
         print("Initialized new tracking data.")
 
@@ -54,17 +78,16 @@ def save_data():
 def get_user_data(user_id):
     """Retrieves or initializes user data and checks for daily reset."""
     user_id_str = str(user_id)
+    if user_id_str not in SCHEDULED_USERS:
+        return None 
+    
     if user_id_str not in user_tracker:
-        # Initialize if the user is in the SCHEDULED_USERS but not in the tracker
-        if user_id_str in SCHEDULED_USERS:
-            user_tracker[user_id_str] = {
-                'last_reset_day': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-                'online_time_timestamp': None,
-                'total_time_online': 0,
-                'reported_today': False
-            }
-        else:
-            return None # Not a user we are tracking
+         user_tracker[user_id_str] = {
+            'last_reset_day': '1970-01-01', # Force reset on first run
+            'online_time_timestamp': None,
+            'total_time_online': 0,
+            'reported_today': False
+        }
 
     # Check for daily reset (using UTC day)
     current_day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -86,30 +109,27 @@ def get_user_data(user_id):
 async def on_ready():
     """Runs when the bot is connected."""
     print(f'Bot is ready and logged in as {client.user}')
-    load_data() # Load persistent data on startup
+    load_data()
 
 @client.event
 async def on_presence_update(old_presence, new_presence):
     """Fires when a member's status, activity, or client changes."""
     user_id_str = str(new_presence.id)
 
-    # 1. Check if the user is one we are tracking
     if user_id_str not in SCHEDULED_USERS:
         return
 
-    # Get tracking data and ensure daily reset
     user_data = get_user_data(user_id_str)
     if not user_data:
-        return # Should not happen if logic is correct, but safe check
+        return 
 
-    # Check for status change (from offline/idle/dnd to online, or vice-versa)
     old_status = old_presence.status
     new_status = new_presence.status
     
     if old_status == new_status:
-        return # No status change
+        return
 
-    member = new_presence # The member object
+    member = new_presence 
     channel = client.get_channel(NOTIFICATION_CHANNEL_ID)
 
     if not channel:
@@ -119,14 +139,11 @@ async def on_presence_update(old_presence, new_presence):
     # --- GOING ONLINE LOGIC ---
     if new_status == discord.Status.online and user_data['online_time_timestamp'] is None:
         
-        # This is the first time the user has gone online since the last daily report/reset
-        
         current_time = datetime.now(timezone.utc)
         user_data['online_time_timestamp'] = current_time.timestamp()
         
         # Calculate lateness
         schedule_str = SCHEDULED_USERS[user_id_str]['schedule']
-        # Combine today's date with the scheduled time, assuming UTC for simplicity
         scheduled_datetime = datetime.combine(
             current_time.date(), 
             datetime.strptime(schedule_str, '%H:%M').time(), 
@@ -135,15 +152,19 @@ async def on_presence_update(old_presence, new_presence):
 
         lateness = current_time - scheduled_datetime
         
-        message = f"🟢 **ATTENTION!** {member.mention} has just come **ONLINE** at **{current_time.strftime('%H:%M:%S UTC')}**."
+        # 🚨 CHANGE: Use 12-hour format for reporting
+        formatted_online_time = current_time.strftime('%I:%M:%S %p UTC')
+        message = f"🟢 **ATTENTION!** {member.mention} has just come **ONLINE** at **{formatted_online_time}**."
         
         # Check if they were late
-        if lateness.total_seconds() > 60: # 60 seconds tolerance
-            minutes_late = int(lateness.total_seconds() / 60)
-            message += f"\n⏰ **LATE:** They were **{minutes_late} minutes** late for their scheduled time of **{schedule_str} UTC**."
-        elif lateness.total_seconds() < -60:
-            minutes_early = int(abs(lateness.total_seconds()) / 60)
-            message += f"\n✅ **EARLY:** They came **{minutes_early} minutes** early for their scheduled time of **{schedule_str} UTC**."
+        lateness_seconds = lateness.total_seconds()
+        
+        if lateness_seconds > 60: # 60 seconds tolerance
+            formatted_lateness = format_elapsed_time(lateness_seconds)
+            message += f"\n⏰ **LATE:** They were **{formatted_lateness}** late for their scheduled time of **{schedule_str} UTC**."
+        elif lateness_seconds < -60:
+            formatted_earlyness = format_elapsed_time(abs(lateness_seconds))
+            message += f"\n✅ **EARLY:** They came **{formatted_earlyness}** early for their scheduled time of **{schedule_str} UTC**."
         else:
             message += f"\n✅ **ON TIME:** They were on time for their scheduled time of **{schedule_str} UTC**."
 
@@ -155,37 +176,29 @@ async def on_presence_update(old_presence, new_presence):
     elif (new_status in [discord.Status.offline, discord.Status.idle, discord.Status.dnd]) \
          and user_data['online_time_timestamp'] is not None:
         
-        # User is going offline/away from an 'online' state
-
         current_time = datetime.now(timezone.utc)
         
-        # Calculate time spent online in this single session
         time_online_session = current_time.timestamp() - user_data['online_time_timestamp']
-        
-        # Accumulate total time
         user_data['total_time_online'] += time_online_session
-        
-        # Clear the online timestamp to prepare for the next 'online' session
         user_data['online_time_timestamp'] = None
 
         # Check if we should send the final daily report
         if new_status == discord.Status.offline and not user_data['reported_today']:
             
-            # Format the total time
-            total_seconds = user_data['total_time_online']
-            hours = int(total_seconds // 3600)
-            minutes = int((total_seconds % 3600) // 60)
+            # 🚨 CHANGE: Use new function for total time format
+            formatted_total_time = format_elapsed_time(user_data['total_time_online'])
             
+            # 🚨 CHANGE: Use 12-hour format for reporting
+            formatted_offline_time = current_time.strftime('%I:%M:%S %p UTC')
+
             final_message = f"""
             🛑 **DAILY REPORT FOR {member.mention}** 🛑
             ---
-            **Last Status:** Went **OFFLINE** at **{current_time.strftime('%H:%M:%S UTC')}**.
-            **Total Time Online Today:** **{hours} hours and {minutes} minutes**.
+            **Last Status:** Went **OFFLINE** at **{formatted_offline_time}**.
+            **Total Time Online Today:** **{formatted_total_time}**.
             """
             
             await channel.send(final_message)
-            
-            # Set the reported flag to prevent spam
             user_data['reported_today'] = True
 
         save_data()

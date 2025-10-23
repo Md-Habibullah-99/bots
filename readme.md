@@ -13,7 +13,7 @@ This README covers both how a developer should set them up and how end users int
 
 ```
 DiscordBots/
-	├─ isOnlineDiscordBot.py     # Posts when target users come online
+	├─ isOnlineDiscordBot.py     # Presence tracking with per-user schedules + daily reports
 	└─ meetingReminder.py        # Schedule and manage meeting reminders via commands
 ```
 
@@ -125,16 +125,44 @@ Notes
 
 What it does
 
-- Listens to presence updates and posts to a channel when a specific user comes online.
+- Tracks presence for specific users you configure.
+- On the first online event of the day, posts whether they were early, on time, or late relative to their scheduled IN time.
+- Accumulates session time across the day (from first online to last offline).
+- At local midnight, posts a daily attendance report per tracked user with:
+	- Scheduled window (IN/OUT)
+	- First Online and Last Offline timestamps (12‑hour format)
+	- Total elapsed time from first online to last offline
+	- Extra time or missing time compared to the schedule
 
 Configure
 
 - Open `DiscordBots/isOnlineDiscordBot.py` and set:
-	- `TARGET_USER_IDs` to a list of integer Discord user IDs to watch.
-	- `NOTIFICATION_CHANNEL_ID` to the ID of the text channel where alerts should be posted.
-	- Replace the placeholder in `client.run('bot id here/token')` with your bot token.
-- Intents: the code already enables `members` and `presences`. Ensure both are enabled for your bot in the Developer Portal (see step 1 above).
-- Optional (recommended): switch to environment variables (`DISCORD_TOKEN`, `TARGET_USER_IDS`, `NOTIFICATION_CHANNEL_ID`) using `os.getenv(...)` and `python-dotenv`.
+	- `TARGET_TIMEZONE` — IANA timezone for your location (default: `Asia/Dhaka`). All times are computed and displayed in this timezone.
+	- `SCHEDULED_USERS` — per‑user schedule map using 24‑hour time strings (`HH:MM`) with day‑wise overrides and a `default` fallback. Example:
+
+		```python
+		SCHEDULED_USERS = {
+				"121exampleid1": {
+						"Saturday": {"in": "10:00", "out": "23:00"},
+						"Sunday":   {"in": "11:00", "out": "21:00"},
+						"default":  {"in": "09:00", "out": "18:00"}
+				},
+				"212exampleid2": {
+						"Monday":  {"in": "09:30", "out": "17:30"},
+						"default": {"in": "10:00", "out": "19:00"}
+				}
+		}
+		```
+
+		Notes:
+		- Keys are Discord user IDs as strings.
+		- Day names must be full names (e.g., `Monday`, `Tuesday`).
+		- If a day isn’t specified, `default` is used.
+
+	- `NOTIFICATION_CHANNEL_ID` — numeric ID of the channel where alerts/reports are posted.
+	- At the bottom, replace `client.run('bot id here/token')` with your bot token string. If you prefer environment variables, you can modify the script to read `os.getenv('DISCORD_TOKEN')`.
+
+- Intents: the code enables `members` and `presences`. Ensure both are turned on for your bot in the Developer Portal.
 
 Run
 
@@ -145,7 +173,18 @@ python isOnlineDiscordBot.py
 
 Behavior
 
-- When any target user transitions to `online`, the bot posts a message mentioning them in the configured channel.
+- Online event:
+	- When a tracked user first comes online for the day, the bot posts an alert indicating if they were Early, On time, or Late compared to their scheduled IN time.
+	- Subsequent online/offline transitions accumulate total time; the first‑online message is sent only once per day per user.
+- Offline/away event:
+	- Ends the current session and records `last_offline` for the day.
+- Daily report at midnight (local timezone):
+	- Posts an attendance summary for the previous day, including First Online, Last Offline, Total Elapsed (first→last), scheduled window, and whether extra or missing time occurred.
+- Time formats:
+	- Inputs in `SCHEDULED_USERS` use 24‑hour format (`HH:MM`).
+	- All messages display times in 12‑hour format with AM/PM and timezone abbreviation.
+- Persistence:
+	- The bot writes lightweight tracking data to `schedule_data.json` in the working directory and resets per user at the start of each new day.
 
 ## Troubleshooting
 
@@ -154,10 +193,15 @@ Behavior
 	- Ensure “Message Content Intent” is enabled (required for command parsing) and the bot has permission to read and send messages in that channel.
 - Presence alerts never fire
 	- Ensure “Presence Intent” and “Server Members Intent” are enabled in Developer Portal and that the bot is in a guild (server) with those users.
+	- Confirm the user is included in `SCHEDULED_USERS`.
+	- Verify `NOTIFICATION_CHANNEL_ID` points to a channel the bot can access.
+- Midnight report didn’t appear
+	- The bot must be running across midnight in the configured timezone; if it starts after midnight, it will wait until the next midnight.
+	- Check that `NOTIFICATION_CHANNEL_ID` is correct, and the bot has permission to post there.
 - “Invalid date/time format” errors
 	- Use the exact format with quotes and AM/PM, e.g., `"2025-12-31 02:30 PM"`.
 - Timezone appears wrong
-	- Set `TIMEZONE_STR` to your local timezone (IANA name) in `meetingReminder.py`.
+	- Set `TIMEZONE_STR` in `meetingReminder.py` and `TARGET_TIMEZONE` in `isOnlineDiscordBot.py` to your local IANA timezone (e.g., `America/New_York`).
 - Permissions
 	- Make sure the bot’s role has “View Channels” and “Send Messages” in the target channel, and the channel isn’t muted or restricted.
 

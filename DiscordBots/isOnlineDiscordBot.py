@@ -1,5 +1,6 @@
 import discord
 import json
+import pytz
 from datetime import datetime, time, timedelta, timezone
 
 # --- CONFIGURATION & DATA MANAGEMENT ---
@@ -7,17 +8,26 @@ from datetime import datetime, time, timedelta, timezone
 # File path to store persistent data
 DATA_FILE = 'schedule_data.json'
 
+# 🚨 CHANGE 1: Define the target timezone explicitly (e.g., 'Asia/Dhaka' which is UTC+6)
+TARGET_TIMEZONE = pytz.timezone('Asia/Dhaka') 
+# Note: If 'Asia/Dhaka' doesn't cover your specific +6 zone, you can use pytz.FixedOffset(360) 
+# where 360 is minutes (6 hours * 60 minutes). 'Asia/Dhaka' is more robust.
+
 # Replace with your actual IDs (use strings for dictionary keys)
-# Format: "USER_ID": {"schedule": "HH:MM"} (24-hour time for internal calculation)
+# Format: "USER_ID": {"schedule": "HH:MM"} (This time is interpreted in TARGET_TIMEZONE)
 SCHEDULED_USERS = {
-    "121exampleid1": {"schedule": "10:00"},
-    "212exampleid2": {"schedule": "11:30"},
+    "121exampleid1": {"schedule": "10:00"}, # 10:00 AM in UTC+6
+    "212exampleid2": {"schedule": "11:30"}, 
     "111exampleid3": {"schedule": "09:00"}
 }
 
 NOTIFICATION_CHANNEL_ID = channel_id_here # Replace with your channel ID
 
 # --- Utility Functions ---
+
+def get_local_now():
+    """Returns the current datetime object localized to the TARGET_TIMEZONE."""
+    return datetime.now(TARGET_TIMEZONE)
 
 def format_elapsed_time(total_seconds):
     """
@@ -36,13 +46,12 @@ def format_elapsed_time(total_seconds):
     if minutes > 0:
         parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
     
-    # Handle cases like "1 hour" and "1 hour and 15 minutes"
     if len(parts) == 2:
         return f"{parts[0]} and {parts[1]}"
     elif len(parts) == 1:
         return parts[0]
     else:
-        return "less than a minute" # Should be caught by the < 60 check, but safe fallback
+        return "less than a minute"
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
@@ -50,7 +59,6 @@ intents.members = True
 intents.presences = True 
 client = discord.Client(intents=intents)
 
-# Global dictionary to hold daily tracking data
 user_tracker = {}
 
 def load_data():
@@ -61,9 +69,10 @@ def load_data():
             user_tracker = json.load(f)
             print("Loaded tracking data.")
     except (FileNotFoundError, json.JSONDecodeError):
+        # Initialize the tracker with scheduled users
         for user_id in SCHEDULED_USERS:
-            user_tracker[user_id] = {
-                'last_reset_day': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+             user_tracker[user_id] = {
+                'last_reset_day': get_local_now().strftime('%Y-%m-%d'),
                 'online_time_timestamp': None,
                 'total_time_online': 0,
                 'reported_today': False
@@ -89,17 +98,17 @@ def get_user_data(user_id):
             'reported_today': False
         }
 
-    # Check for daily reset (using UTC day)
-    current_day = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    # 🚨 CHANGE 2: Check for daily reset using the local target day
+    current_day = get_local_now().strftime('%Y-%m-%d')
     if user_tracker[user_id_str]['last_reset_day'] != current_day:
-        print(f"Resetting data for user {user_id_str}")
+        print(f"Resetting data for user {user_id_str} for new day: {current_day}")
         user_tracker[user_id_str] = {
             'last_reset_day': current_day,
             'online_time_timestamp': None,
             'total_time_online': 0,
             'reported_today': False
         }
-        save_data() # Save reset
+        save_data()
 
     return user_tracker[user_id_str]
 
@@ -126,8 +135,12 @@ async def on_presence_update(old_presence, new_presence):
     old_status = old_presence.status
     new_status = new_presence.status
     
-    if old_status == new_status:
-        return
+    # Ignore status changes if the user remains online/idle/dnd or remains offline
+    is_going_online = new_status == discord.Status.online and old_status not in [discord.Status.online, discord.Status.idle, discord.Status.dnd]
+    is_going_offline_or_away = new_status in [discord.Status.offline, discord.Status.idle, discord.Status.dnd] and old_status == discord.Status.online
+
+    if not (is_going_online or is_going_offline_or_away):
+        return # Only process transitions that matter for session tracking
 
     member = new_presence 
     channel = client.get_channel(NOTIFICATION_CHANNEL_ID)
@@ -136,71 +149,79 @@ async def on_presence_update(old_presence, new_presence):
         print(f"Error: Notification channel (ID: {NOTIFICATION_CHANNEL_ID}) not found.")
         return
 
-    # --- GOING ONLINE LOGIC ---
-    if new_status == discord.Status.online and user_data['online_time_timestamp'] is None:
+    # --- GOING ONLINE LOGIC (First time in a session) ---
+    # 🚨 CHANGE 3: Only report ONCE PER DAY (if they haven't been reported) and when they start a new session (online_time_timestamp is None)
+    if is_going_online and user_data['online_time_timestamp'] is None:
         
-        current_time = datetime.now(timezone.utc)
-        user_data['online_time_timestamp'] = current_time.timestamp()
+        current_time = get_local_now()
+        user_data['online_time_timestamp'] = current_time.timestamp() # Store UTC timestamp
         
-        # Calculate lateness
+        # Check if the "online" message has already been sent for today
+        if user_data['reported_today']:
+             save_data()
+             return # Already reported the summary, don't report online again
+
+        # --- Lateness Calculation ---
         schedule_str = SCHEDULED_USERS[user_id_str]['schedule']
-        scheduled_datetime = datetime.combine(
-            current_time.date(), 
-            datetime.strptime(schedule_str, '%H:%M').time(), 
-            tzinfo=timezone.utc
+        
+        # Combine current day's date with the scheduled time, localized to TARGET_TIMEZONE
+        scheduled_time_24hr = datetime.strptime(schedule_str, '%H:%M').time()
+        scheduled_datetime = TARGET_TIMEZONE.localize(
+            datetime.combine(current_time.date(), scheduled_time_24hr)
         )
 
         lateness = current_time - scheduled_datetime
         
-        # 🚨 CHANGE: Use 12-hour format for reporting
-        formatted_online_time = current_time.strftime('%I:%M:%S %p UTC')
+        # 🚨 CHANGE 4: Use 12-hour format and local time zone name
+        tz_abbr = current_time.strftime('%Z')
+        formatted_online_time = current_time.strftime(f'%I:%M:%S %p {tz_abbr}')
         message = f"🟢 **ATTENTION!** {member.mention} has just come **ONLINE** at **{formatted_online_time}**."
         
-        # Check if they were late
+        # Check for lateness
         lateness_seconds = lateness.total_seconds()
         
-        if lateness_seconds > 60: # 60 seconds tolerance
+        if lateness_seconds > 60: # 60 seconds tolerance for late
             formatted_lateness = format_elapsed_time(lateness_seconds)
-            message += f"\n⏰ **LATE:** They were **{formatted_lateness}** late for their scheduled time of **{schedule_str} UTC**."
-        elif lateness_seconds < -60:
+            message += f"\n⏰ **LATE:** They were **{formatted_lateness}** late for their scheduled time of **{schedule_str} {tz_abbr}**."
+        elif lateness_seconds < -60: # 60 seconds tolerance for early
             formatted_earlyness = format_elapsed_time(abs(lateness_seconds))
-            message += f"\n✅ **EARLY:** They came **{formatted_earlyness}** early for their scheduled time of **{schedule_str} UTC**."
+            message += f"\n✅ **EARLY:** They came **{formatted_earlyness}** early for their scheduled time of **{schedule_str} {tz_abbr}**."
         else:
-            message += f"\n✅ **ON TIME:** They were on time for their scheduled time of **{schedule_str} UTC**."
+            message += f"\n✅ **ON TIME:** They were on time for their scheduled time of **{schedule_str} {tz_abbr}**."
 
         await channel.send(message)
         save_data()
 
 
-    # --- GOING OFFLINE LOGIC (IDLE/DND/OFFLINE) ---
-    elif (new_status in [discord.Status.offline, discord.Status.idle, discord.Status.dnd]) \
-         and user_data['online_time_timestamp'] is not None:
+    # --- GOING OFFLINE LOGIC (Session ends) ---
+    elif is_going_offline_or_away and user_data['online_time_timestamp'] is not None:
         
-        current_time = datetime.now(timezone.utc)
+        current_time = get_local_now()
         
+        # Calculate time spent online in this single session
         time_online_session = current_time.timestamp() - user_data['online_time_timestamp']
         user_data['total_time_online'] += time_online_session
-        user_data['online_time_timestamp'] = None
+        user_data['online_time_timestamp'] = None # Session ended
 
-        # Check if we should send the final daily report
+        # 🚨 CHANGE 5: Check if we should send the final daily report (ONLY when going fully offline)
         if new_status == discord.Status.offline and not user_data['reported_today']:
             
-            # 🚨 CHANGE: Use new function for total time format
             formatted_total_time = format_elapsed_time(user_data['total_time_online'])
             
-            # 🚨 CHANGE: Use 12-hour format for reporting
-            formatted_offline_time = current_time.strftime('%I:%M:%S %p UTC')
+            # Use 12-hour format and local time zone name
+            tz_abbr = current_time.strftime('%Z')
+            formatted_offline_time = current_time.strftime(f'%I:%M:%S %p {tz_abbr}')
 
             final_message = f"""
             🛑 **DAILY REPORT FOR {member.mention}** 🛑
             ---
-            **Last Status:** Went **OFFLINE** at **{formatted_offline_time}**.
+            **Last Status:** Went **OFFLINE** at **{formatted_offline_time}** ({tz_abbr}).
             **Total Time Online Today:** **{formatted_total_time}**.
             """
             
             await channel.send(final_message)
-            user_data['reported_today'] = True
-
+            user_data['reported_today'] = True # Mark as reported for the day
+            
         save_data()
 
 # --- Run the Bot ---

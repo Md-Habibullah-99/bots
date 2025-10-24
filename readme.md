@@ -13,8 +13,9 @@ This README covers both how a developer should set them up and how end users int
 
 ```
 DiscordBots/
-	├─ isOnlineDiscordBot.py     # Presence tracking with per-user schedules + daily reports
-	└─ meetingReminder.py        # Schedule and manage meeting reminders via commands
+	├─ Login_notification_simble_verson.py  # Simple first-online alert vs schedule (once/day)
+	├─ Login_notification.py                 # Full presence tracking + midnight attendance report
+	└─ Meeting_Reminder.py                   # Schedule and manage meeting reminders via commands
 ```
 
 ## Prerequisites
@@ -69,7 +70,7 @@ Make sure `.env` is listed in `.gitignore` (don’t commit secrets).
 
 You can run either bot independently. Use separate terminals if you want both online at the same time.
 
-### A) Meeting Reminder Bot (`DiscordBots/meetingReminder.py`)
+### A) Meeting Reminder Bot (`DiscordBots/Meeting_Reminder.py`)
 
 What it does
 
@@ -89,7 +90,7 @@ Run
 
 ```bash
 cd DiscordBots
-python meetingReminder.py
+python Meeting_Reminder.py
 ```
 
 Use in Discord (for end users)
@@ -121,70 +122,65 @@ Notes
 - All times are interpreted in `TIMEZONE_STR`.
 - Reminders clear from memory when the “now” message is sent or the process restarts.
 
-### B) Presence Alert Bot (`DiscordBots/isOnlineDiscordBot.py`)
+### B) Login Notification Bot — Simple version (`DiscordBots/Login_notification_simble_verson.py`)
 
 What it does
 
-- Tracks presence for specific users you configure.
-- On the first online event of the day, posts whether they were early, on time, or late relative to their scheduled IN time.
-- Accumulates session time across the day (from first online to last offline).
-- At local midnight, posts a daily attendance report per tracked user with:
-	- Scheduled window (IN/OUT)
-	- First Online and Last Offline timestamps (12‑hour format)
-	- Total elapsed time from first online to last offline
-	- Extra time or missing time compared to the schedule
+- Sends a single alert the first time a tracked user becomes active (online/idle/dnd) each day.
+- Compares first-online time against the user’s scheduled IN time for that day; posts Early/On time/Late.
+- No session accumulation and no midnight summary; resets the “sent” flag daily.
 
 Configure
 
-- Open `DiscordBots/isOnlineDiscordBot.py` and set:
-	- `TARGET_TIMEZONE` — IANA timezone for your location (default: `Asia/Dhaka`). All times are computed and displayed in this timezone.
-	- `SCHEDULED_USERS` — per‑user schedule map using 24‑hour time strings (`HH:MM`) with day‑wise overrides and a `default` fallback. Example:
-
-		```python
-		SCHEDULED_USERS = {
-				"121exampleid1": {
-						"Saturday": {"in": "10:00", "out": "23:00"},
-						"Sunday":   {"in": "11:00", "out": "21:00"},
-						"default":  {"in": "09:00", "out": "18:00"}
-				},
-				"212exampleid2": {
-						"Monday":  {"in": "09:30", "out": "17:30"},
-						"default": {"in": "10:00", "out": "19:00"}
-				}
-		}
-		```
-
-		Notes:
-		- Keys are Discord user IDs as strings.
-		- Day names must be full names (e.g., `Monday`, `Tuesday`).
-		- If a day isn’t specified, `default` is used.
-
-	- `NOTIFICATION_CHANNEL_ID` — numeric ID of the channel where alerts/reports are posted.
-	- At the bottom, replace `client.run('bot id here/token')` with your bot token string. If you prefer environment variables, you can modify the script to read `os.getenv('DISCORD_TOKEN')`.
-
-- Intents: the code enables `members` and `presences`. Ensure both are turned on for your bot in the Developer Portal.
+- Open `DiscordBots/Login_notification_simble_verson.py` and set:
+	- `TARGET_TIMEZONE` — IANA timezone for your location (default: `Asia/Dhaka`).
+	- `SCHEDULED_USERS` — per‑user schedule map using 24‑hour strings (`HH:MM`) with day‑overrides and `default` fallback.
+	- `NOTIFICATION_CHANNEL_ID` — numeric ID of the channel for alerts.
+	- At the bottom, set your token in `client.run('bot id here/token')` or switch to `os.getenv('DISCORD_TOKEN')`.
+- Intents: enable “Server Members” and “Presence” in the Developer Portal.
 
 Run
 
 ```bash
 cd DiscordBots
-python isOnlineDiscordBot.py
+python Login_notification_simble_verson.py
 ```
 
 Behavior
 
-- Online event:
-	- When a tracked user first comes online for the day, the bot posts an alert indicating if they were Early, On time, or Late compared to their scheduled IN time.
-	- Subsequent online/offline transitions accumulate total time; the first‑online message is sent only once per day per user.
-- Offline/away event:
-	- Ends the current session and records `last_offline` for the day.
-- Daily report at midnight (local timezone):
-	- Posts an attendance summary for the previous day, including First Online, Last Offline, Total Elapsed (first→last), scheduled window, and whether extra or missing time occurred.
-- Time formats:
-	- Inputs in `SCHEDULED_USERS` use 24‑hour format (`HH:MM`).
-	- All messages display times in 12‑hour format with AM/PM and timezone abbreviation.
-- Persistence:
-	- The bot writes lightweight tracking data to `schedule_data.json` in the working directory and resets per user at the start of each new day.
+- Triggers once per user per day on first active presence; posts Early/On time/Late relative to the configured schedule.
+
+### C) Login Notification Bot — Advanced version (`DiscordBots/Login_notification.py`)
+
+What it does
+
+- Tracks presence sessions: records first online and last offline times per day.
+- Sends first-online alert with Early/On time/Late relative to scheduled IN time.
+- At local midnight, posts an attendance report per tracked user with scheduled window, first/last timestamps, total elapsed (first→last), and extra/missing time vs schedule.
+- Persists lightweight data in `schedule_data.json` (created in working directory).
+
+Configure
+
+- Open `DiscordBots/Login_notification.py` and set:
+	- `TARGET_TIMEZONE` — IANA timezone for your location (default: `Asia/Dhaka`).
+	- `SCHEDULED_USERS` — per‑user schedules with day‑specific overrides and `default` fallback.
+	- `NOTIFICATION_CHANNEL_ID` — numeric ID of the channel for alerts and reports.
+	- At the bottom, set your token in `client.run('bot id here/token')` or use an environment variable.
+- Intents: enable “Server Members” and “Presence” in the Developer Portal.
+- Data: ensure the process can create/write `schedule_data.json` in the working directory.
+
+Run
+
+```bash
+cd DiscordBots
+python Login_notification.py
+```
+
+Behavior
+
+- Online: starts a session and sends one lateness/earlyness message per user per day.
+- Offline/away: ends session and updates last offline.
+- Midnight: posts the daily attendance summary and resets user data for the new day.
 
 ## Troubleshooting
 

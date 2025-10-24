@@ -3,7 +3,7 @@
 Two lightweight Discord bots live in this repository under `DiscordBots/`:
 
 - Meeting Reminder Bot (`DiscordBots/meetingReminder.py`): schedule meeting reminders with 12‑hour time input and send notices at 15, 10, 2 minutes, and at start time. Users can acknowledge with `!ok` to reduce intermediate pings.
-- Presence Alert Bot (`DiscordBots/isOnlineDiscordBot.py`): watches specific user IDs and posts a message when any of them comes online in your server.
+- Presence Alert Bot (`DiscordBots/Login_notification.py`): watches specific user IDs and posts a message when any of them comes online in your server.
 
 This README covers both how a developer should set them up and how end users interact with them in Discord.
 
@@ -197,7 +197,7 @@ Behavior
 - “Invalid date/time format” errors
 	- Use the exact format with quotes and AM/PM, e.g., `"2025-12-31 02:30 PM"`.
 - Timezone appears wrong
-	- Set `TIMEZONE_STR` in `meetingReminder.py` and `TARGET_TIMEZONE` in `isOnlineDiscordBot.py` to your local IANA timezone (e.g., `America/New_York`).
+	- Set `TIMEZONE_STR` in `meetingReminder.py` and `TARGET_TIMEZONE` in `Login_notification.py` to your local IANA timezone (e.g., `America/New_York`).
 - Permissions
 	- Make sure the bot’s role has “View Channels” and “Send Messages” in the target channel, and the channel isn’t muted or restricted.
 
@@ -214,5 +214,5 @@ Behavior
 
 ## License
 
-No license file is included. If you plan to share this publicly, consider adding a license (e.g., MIT) to clarify usage rights.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
 

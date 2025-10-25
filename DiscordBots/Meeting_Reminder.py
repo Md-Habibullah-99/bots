@@ -111,11 +111,10 @@ async def reminder_checker():
 # 3. Command Logic (UPDATED: !SCHEDULE for smart time parsing)
 # ----------------------------------------------------------------------
 
-# --- !SCHEDULE command (MODIFIED: Date/Time parsing) ---
-@client.command(name='schedule', help='Schedule a meeting reminder. Format: !schedule "<YYYY-MM-DD HH:MM AM/PM>" or "<HH:MM>" or "<HH:MM AM/PM>" <@user1 @user2...> <Meeting Topic>')
+# --- !SCHEDULE command (MODIFIED: Date/Time parsing for single-digit minutes) ---
+@client.command(name='schedule', help='Schedule a meeting reminder. Format: !schedule "<YYYY-MM-DD HH:MM AM/PM>" or "<HH:M>" or "<HH:MM AM/PM>" <@user1 @user2...> <Meeting Topic>')
 async def schedule_meeting(ctx, date_time_str: str, *args):
     scheduler_id = ctx.author.id
-    # Current time: 2025-10-25 11:20:xx AM +06
     now = datetime.datetime.now(BOT_TZ).replace(second=0, microsecond=0)
     meeting_time = None
     
@@ -126,22 +125,36 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
         meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
         
     except ValueError:
-        # B. Smart Time-Only Parsing (HH:MM AM/PM or HH:MM)
+        # B. Smart Time-Only Parsing (HH:M AM/PM or HH:M)
         
-        # Regex to check if it's a time-only format: HH:MM or HH:MM AM/PM
-        # group(1) = HH:MM, group(2) = ( AM| PM), group(3) = AM|PM
-        time_only_match = re.match(r'^(\d{1,2}:\d{2})( (AM|PM))?$', date_time_str, re.IGNORECASE)
+        # Regex updated: Allows 1 or 2 digits for minutes (\d{1,2}:\d{1,2})
+        # group(1) = HH:M, group(2) = ( AM| PM), group(3) = AM|PM
+        time_only_match = re.match(r'^(\d{1,2}:\d{1,2})( (AM|PM))?$', date_time_str, re.IGNORECASE)
         
         if time_only_match:
-            time_part = time_only_match.group(1) # e.g., "10:30" or "02:00"
+            time_raw = time_only_match.group(1) # e.g., "11:2" or "10:30"
             ampm_part = time_only_match.group(2) # e.g., " AM" or " PM" or None
+            
+            # --- NORMALIZATION STEP ---
+            # Split and pad the minute part if it's a single digit (e.g., 11:2 -> 11:02)
+            try:
+                hour_str, minute_str = time_raw.split(':')
+                if len(minute_str) == 1:
+                    minute_str = '0' + minute_str
+                time_part = f"{hour_str}:{minute_str}" # Normalized time: "11:02"
+            except ValueError:
+                # Should not happen if regex matched, but for safety
+                return await ctx.send(f"❌ **Error:** Time format issue encountered during normalization. Please check your time input.")
+            # --------------------------
             
             date_today = now.date()
             
             if ampm_part:
                 # Case 1: Format: "HH:MM AM/PM" (Explicit AM/PM)
                 try:
-                    time_obj = datetime.datetime.strptime(date_time_str, '%I:%M %p').time()
+                    # Now we use the normalized time_part
+                    time_with_ampm = time_part + ampm_part 
+                    time_obj = datetime.datetime.strptime(time_with_ampm, '%I:%M %p').time()
                     naive_dt = datetime.datetime.combine(date_today, time_obj)
                     meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
                     
@@ -152,26 +165,21 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
                         meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
                         
                 except ValueError:
-                    pass # Continue to final error check
+                    pass 
 
             else:
                 # Case 2: Format: "HH:MM" (Naked Time - AM/PM must be guessed)
                 try:
-                    # Attempt to parse as a 12-hour time for the PM occurrence today
-                    
                     # 1. Try PM first (most common for naked scheduling during the day)
-                    # We combine the time string with " PM" and try to parse
                     time_with_pm = time_part + " PM"
                     time_obj_pm = datetime.datetime.strptime(time_with_pm, '%I:%M %p').time()
                     naive_dt_pm = datetime.datetime.combine(date_today, time_obj_pm)
                     meeting_time_pm = BOT_TZ.localize(naive_dt_pm).replace(second=0, microsecond=0)
 
                     if meeting_time_pm > now:
-                        # Success! The PM time is in the future. (e.g., now 11:20 AM, user enters 1:30 -> 1:30 PM today)
                         meeting_time = meeting_time_pm
                     else:
                         # 2. If PM is in the past, try AM for tomorrow
-                        # (e.g., now 1:35 PM, user enters 1:30 -> 1:30 PM is past, so next 1:30 is 1:30 AM tomorrow)
                         time_with_am = time_part + " AM"
                         time_obj_am = datetime.datetime.strptime(time_with_am, '%I:%M %p').time()
                         
@@ -192,13 +200,12 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
                             naive_dt = datetime.datetime.combine(date_tomorrow, time_obj)
                             meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
                     except ValueError:
-                        pass # Continue to final error check
+                        pass 
         
         
     if not meeting_time:
-        # If any parsing attempt failed, send a generic error
         return await ctx.send(
-            f"❌ **Error:** Invalid date/time format. Use `\"YYYY-MM-DD HH:MM AM/PM\"`, `\"HH:MM AM/PM\"`, or just `\"HH:MM\"` (which smartly picks the next occurrence)."
+            f"❌ **Error:** Invalid date/time format. Use `\"YYYY-MM-DD HH:MM AM/PM\"`, `\"HH:MM AM/PM\"`, or just `\"HH:M\"` (e.g., `\"11:2\"` for 11:02 PM/AM, which smartly picks the next occurrence)."
         )
 
     # 2. Check if the meeting is in the past
@@ -247,6 +254,7 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
         f"**Topic:** {meeting_topic}\n"
         f"**Time:** {meeting_time.strftime('%Y-%m-%d %I:%M %p %Z')}\n"
         f"**Participants:** {user_mentions_str}\n"
+        f"Type `!list` to see your active scheduled meetings\n"
         f"Reminders will be sent at 15, 10, and 2 minutes. Use `!ok` to skip 15/10 min reminders."
     )
     await ctx.send(confirmation_message)
@@ -413,6 +421,7 @@ async def on_command_error(ctx, error):
         pass
     else:
         print(f"An unexpected error occurred: {error}")
+
 
 
 

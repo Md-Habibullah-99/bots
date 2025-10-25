@@ -2,9 +2,18 @@ import discord
 from discord.ext import commands, tasks
 import datetime
 import pytz
-import re 
+import re
+import json
+import os 
+from pathlib import Path #Import Pathlib for robust path handling
 
 # --- Configuration ---
+
+# Get the directory of the current Python script
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# File path for persistent storage, relative to the script's directory
+SCHEDULE_FILE = SCRIPT_DIR / 'reminders.json' 
 
 # 1. Set Intents
 intents = discord.Intents.default()
@@ -16,6 +25,7 @@ BOT_PREFIX = "!"
 client = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
 # --- Reminder Storage ---
+# This will be populated from the JSON file on startup
 REMINDERS_LIST = [] 
 
 # Global timezone for all reminders 
@@ -24,19 +34,79 @@ BOT_TZ = pytz.timezone(TIMEZONE_STR)
 # Updated reminder times in minutes before the meeting
 REMINDER_INTERVALS = [15, 10, 2, 0] 
 
+
+
 # ----------------------------------------------------------------------
-# 2. Discord Events and Tasks
+# 2. JSON Persistence Functions
+# ----------------------------------------------------------------------
+
+def load_reminders():
+    """Loads reminders from the JSON file."""
+    global REMINDERS_LIST
+    # 🌟 MODIFIED: os.path.exists() works with Path objects, or you can use SCHEDULE_FILE.exists()
+    if SCHEDULE_FILE.exists(): 
+        with open(SCHEDULE_FILE, 'r') as f:
+            try:
+                data = json.load(f)
+                
+                # Deserialize data back into Python objects (rest of logic unchanged)
+                for item in data:
+                    time_str = item.pop('time') 
+                    item['time'] = datetime.datetime.fromisoformat(time_str).astimezone(BOT_TZ).replace(second=0, microsecond=0)
+                    
+                    confirmed_users_str = item.pop('confirmed_users')
+                    confirmed_users_int = {int(k): v for k, v in confirmed_users_str.items()}
+                    item['confirmed_users'] = confirmed_users_int
+                    
+                    item['users'] = [int(uid) for uid in item['users']]
+                    item['channel_id'] = int(item['channel_id'])
+                    item['scheduler_id'] = int(item['scheduler_id'])
+                    
+                    REMINDERS_LIST.append(item)
+                    
+                print(f"Loaded {len(REMINDERS_LIST)} reminders from {SCHEDULE_FILE.name}.")
+                
+            except json.JSONDecodeError:
+                print(f"Error decoding JSON from {SCHEDULE_FILE.name}. File might be empty or corrupted.")
+                REMINDERS_LIST = []
+    else:
+        print(f"No {SCHEDULE_FILE.name} found. Starting with an empty reminder list.")
+        REMINDERS_LIST = []
+
+def save_reminders():
+    """Saves reminders to the JSON file."""
+    serializable_list = []
+    for reminder in REMINDERS_LIST:
+        temp = reminder.copy()
+        
+        temp['time'] = temp['time'].isoformat()
+        temp['confirmed_users'] = {str(k): v for k, v in temp['confirmed_users'].items()}
+        
+        temp['users'] = [str(uid) for uid in temp['users']]
+        temp['channel_id'] = str(temp['channel_id'])
+        temp['scheduler_id'] = str(temp['scheduler_id'])
+        
+        serializable_list.append(temp)
+        
+    with open(SCHEDULE_FILE, 'w') as f:
+        json.dump(serializable_list, f, indent=4)
+    # print(f"Saved {len(serializable_list)} reminders to {SCHEDULE_FILE.name}.")
+
+# ----------------------------------------------------------------------
+# 3. Discord Events and Tasks (Modified on_ready)
 # ----------------------------------------------------------------------
 
 @client.event
 async def on_ready():
+    # 🌟 NEW: Load data on startup
+    load_reminders() 
+    
     print(f'Bot is ready and logged in as {client.user}')
     print(f'Using Timezone: {TIMEZONE_STR}')
     reminder_checker.start()
-    # Updated help message to reflect 12hr time format
     await client.change_presence(activity=discord.Game(name=f'{BOT_PREFIX}schedule | {BOT_PREFIX}ok'))
 
-# --- Scheduled Reminder Checker ---
+# --- Scheduled Reminder Checker (Unchanged, but relies on loaded data) ---
 
 @tasks.loop(minutes=1) 
 async def reminder_checker():
@@ -100,25 +170,27 @@ async def reminder_checker():
 
 
     # Clean up finished reminders
-    for reminder in reminders_to_remove:
-        if reminder in REMINDERS_LIST:
-            REMINDERS_LIST.remove(reminder)
-            
     if reminders_to_remove:
-        print(f"Removed {len(reminders_to_remove)} finished reminders.")
+        for reminder in reminders_to_remove:
+            if reminder in REMINDERS_LIST:
+                REMINDERS_LIST.remove(reminder)
+        
+        # 🌟 NEW: Save data after successful removal of finished reminders
+        save_reminders() 
+        print(f"Removed {len(reminders_to_remove)} finished reminders and saved changes.")
 
 # ----------------------------------------------------------------------
-# 3. Command Logic (UPDATED: !SCHEDULE for smart time parsing)
+# 4. Command Logic (Modified to include save_reminders())
 # ----------------------------------------------------------------------
 
-# --- !SCHEDULE command (MODIFIED: Date/Time parsing for single-digit minutes) ---
+# --- !SCHEDULE command (ADDED save_reminders) ---
 @client.command(name='schedule', help='Schedule a meeting reminder. Format: !schedule "<YYYY-MM-DD HH:MM AM/PM>" or "<HH:M>" or "<HH:MM AM/PM>" <@user1 @user2...> <Meeting Topic>')
 async def schedule_meeting(ctx, date_time_str: str, *args):
     scheduler_id = ctx.author.id
     now = datetime.datetime.now(BOT_TZ).replace(second=0, microsecond=0)
     meeting_time = None
     
-    # 1. Attempt to Parse Date and Time
+    # 1. Attempt to Parse Date and Time (Parsing logic remains unchanged)
     try:
         # A. Full format: "YYYY-MM-DD HH:MM AM/PM"
         naive_dt = datetime.datetime.strptime(date_time_str, '%Y-%m-%d %I:%M %p')
@@ -126,24 +198,19 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
         
     except ValueError:
         # B. Smart Time-Only Parsing (HH:M AM/PM or HH:M)
-        
-        # Regex updated: Allows 1 or 2 digits for minutes (\d{1,2}:\d{1,2})
-        # group(1) = HH:M, group(2) = ( AM| PM), group(3) = AM|PM
         time_only_match = re.match(r'^(\d{1,2}:\d{1,2})( (AM|PM))?$', date_time_str, re.IGNORECASE)
         
         if time_only_match:
-            time_raw = time_only_match.group(1) # e.g., "11:2" or "10:30"
-            ampm_part = time_only_match.group(2) # e.g., " AM" or " PM" or None
+            time_raw = time_only_match.group(1) 
+            ampm_part = time_only_match.group(2) 
             
             # --- NORMALIZATION STEP ---
-            # Split and pad the minute part if it's a single digit (e.g., 11:2 -> 11:02)
             try:
                 hour_str, minute_str = time_raw.split(':')
                 if len(minute_str) == 1:
                     minute_str = '0' + minute_str
-                time_part = f"{hour_str}:{minute_str}" # Normalized time: "11:02"
+                time_part = f"{hour_str}:{minute_str}" 
             except ValueError:
-                # Should not happen if regex matched, but for safety
                 return await ctx.send(f"❌ **Error:** Time format issue encountered during normalization. Please check your time input.")
             # --------------------------
             
@@ -152,13 +219,11 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
             if ampm_part:
                 # Case 1: Format: "HH:MM AM/PM" (Explicit AM/PM)
                 try:
-                    # Now we use the normalized time_part
                     time_with_ampm = time_part + ampm_part 
                     time_obj = datetime.datetime.strptime(time_with_ampm, '%I:%M %p').time()
                     naive_dt = datetime.datetime.combine(date_today, time_obj)
                     meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
                     
-                    # If the localized time is in the past, push it to tomorrow
                     if meeting_time <= now:
                         date_tomorrow = date_today + datetime.timedelta(days=1)
                         naive_dt = datetime.datetime.combine(date_tomorrow, time_obj)
@@ -170,7 +235,7 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
             else:
                 # Case 2: Format: "HH:MM" (Naked Time - AM/PM must be guessed)
                 try:
-                    # 1. Try PM first (most common for naked scheduling during the day)
+                    # 1. Try PM first
                     time_with_pm = time_part + " PM"
                     time_obj_pm = datetime.datetime.strptime(time_with_pm, '%I:%M %p').time()
                     naive_dt_pm = datetime.datetime.combine(date_today, time_obj_pm)
@@ -195,7 +260,6 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
                         meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
 
                         if meeting_time <= now:
-                            # If in the past, push to tomorrow
                             date_tomorrow = date_today + datetime.timedelta(days=1)
                             naive_dt = datetime.datetime.combine(date_tomorrow, time_obj)
                             meeting_time = BOT_TZ.localize(naive_dt).replace(second=0, microsecond=0)
@@ -212,7 +276,7 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
     if meeting_time < now + datetime.timedelta(minutes=1):
         return await ctx.send("❌ **Error:** Cannot schedule a meeting in the past or immediately. Please choose a future time.")
 
-    # 3. Separate Mentions from the Message Topic (Unchanged)
+    # 3. Separate Mentions from the Message Topic
     mentioned_ids = []
     message_parts = []
     
@@ -242,11 +306,14 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
         'message': meeting_topic,
         'channel_id': ctx.channel.id, 
         'scheduler_id': scheduler_id,
-        'confirmed_users': {} # Key: user_id, Value: datetime_confirmed
+        'confirmed_users': {} # Key: user_id, Value: datetime_confirmed (Not used for JSON here, just the ID is key)
     }
     REMINDERS_LIST.append(new_reminder)
     
-    # 5. Confirmation Message (Updated to show 12hr time)
+    # 🌟 NEW: Save data after successful scheduling
+    save_reminders() 
+    
+    # 5. Confirmation Message
     user_mentions_str = " ".join([f"<@{uid}>" for uid in mentioned_ids])
     
     confirmation_message = (
@@ -259,7 +326,7 @@ async def schedule_meeting(ctx, date_time_str: str, *args):
     )
     await ctx.send(confirmation_message)
 
-# --- !OK Command (MODIFIED: Simplified logic for 2-minute jump) ---
+# --- !OK Command (ADDED save_reminders) ---
 @client.command(name='ok', help='Acknowledges the meeting reminder to silence the next notification.')
 async def confirm_meeting(ctx):
     user_id = ctx.author.id
@@ -280,8 +347,11 @@ async def confirm_meeting(ctx):
     if user_id in reminder['confirmed_users']:
         return await ctx.send(f"ℹ️ You have already confirmed the next reminder for **'{reminder['message']}'**.")
 
-    # 2. Update the reminder status
+    # 2. Update the reminder status (Note: The datetime value stored here doesn't matter for persistence, only the key)
     reminder['confirmed_users'][user_id] = now
+    
+    # 🌟 NEW: Save data after successful confirmation
+    save_reminders()
     
     # 3. Determine skip message based on current time
     minutes_until_meeting = int((reminder['time'] - now).total_seconds() / 60)
@@ -289,16 +359,12 @@ async def confirm_meeting(ctx):
     skip_message = ""
     
     if minutes_until_meeting > 15:
-        # Confirmed before 15 min reminder. Skip 15 & 10.
         skip_message = "You will skip the **15-minute and 10-minute** reminders."
     elif minutes_until_meeting > 10:
-        # Confirmed after 15 min, before 10 min. Skip 10.
         skip_message = "You will skip the **10-minute** reminder."
     elif minutes_until_meeting > 2:
-        # Confirmed after 10 min, before 2 min. Skip none of the current intervals, but confirm.
         skip_message = "You have confirmed the next reminders. You will only receive the **2-minute** reminder."
     else:
-        # Confirmed between 2 min and NOW. Only the "NOW" reminder remains.
         skip_message = "Only the **'Meeting is NOW'** reminder will be sent to you."
 
 
@@ -311,7 +377,7 @@ async def confirm_meeting(ctx):
     )
 
 
-# --- !LIST command (Unchanged, time format updated) ---
+# --- !LIST command (Unchanged) ---
 @client.command(name='list', help='Lists all currently scheduled meeting reminders by you.')
 async def list_meetings(ctx):
     user_id = ctx.author.id
@@ -344,7 +410,7 @@ async def list_meetings(ctx):
     await ctx.send(message)
 
 
-# --- !CANCEL command (MODIFIED: Added 'all' and '.' options) ---
+# --- !CANCEL command (ADDED save_reminders) ---
 @client.command(name='cancel', help='Cancels a scheduled meeting. Use !list to find the ID, or use "!cancel all" or "!cancel ." to cancel all your meetings.')
 async def cancel_meeting(ctx, meeting_id_or_command: str):
     user_id = ctx.author.id
@@ -352,7 +418,6 @@ async def cancel_meeting(ctx, meeting_id_or_command: str):
     # Check for 'all' or '.' command
     if meeting_id_or_command.lower() in ['all', '.']:
         
-        # Identify all meetings scheduled by the user
         user_reminders_to_cancel = [r for r in REMINDERS_LIST if r['scheduler_id'] == user_id]
         
         if not user_reminders_to_cancel:
@@ -361,14 +426,14 @@ async def cancel_meeting(ctx, meeting_id_or_command: str):
         count = 0
         for reminder in user_reminders_to_cancel:
             try:
-                # Remove the reminder from the global list
                 REMINDERS_LIST.remove(reminder)
                 count += 1
             except ValueError:
-                # This should theoretically not happen if REMINDERS_LIST is managed correctly
                 pass
 
         if count > 0:
+            # 🌟 NEW: Save data after batch cancellation
+            save_reminders() 
             await ctx.send(
                 f"✅ **Batch Cancellation Complete!**\n"
                 f"Successfully cancelled **{count}** active meetings scheduled by you."
@@ -376,16 +441,14 @@ async def cancel_meeting(ctx, meeting_id_or_command: str):
         else:
             await ctx.send("❌ **Cancellation Error:** Could not find and remove any of your active meetings.")
         
-        return # Exit the command after handling 'all'/''.
+        return
         
     
-    # Handle single meeting cancellation by ID (Original Logic)
-    
+    # Handle single meeting cancellation by ID
     try:
         meeting_id = int(meeting_id_or_command)
     except ValueError:
         return await ctx.send(f"❌ **Cancellation Failed:** Invalid input. Use the meeting ID (e.g., `!cancel 1`), or use `!cancel all` / `!cancel .` to cancel everything.")
-
 
     user_reminders = [r for r in REMINDERS_LIST if r['scheduler_id'] == user_id]
     
@@ -401,6 +464,9 @@ async def cancel_meeting(ctx, meeting_id_or_command: str):
     
     try:
         REMINDERS_LIST.remove(reminder_to_remove)
+        
+        # 🌟 NEW: Save data after single cancellation
+        save_reminders() 
         
         await ctx.send(
             f"✅ **Meeting Cancelled!**\n"
@@ -425,5 +491,7 @@ async def on_command_error(ctx, error):
 
 
 
+
 # 4. Run the Bot
-client.run('Your bot token goes here')
+client.run('Your bot token goes here') 
+# NOTE: Replace 'Your bot token goes here' with your actual bot token to run it.

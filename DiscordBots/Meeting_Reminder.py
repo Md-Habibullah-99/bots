@@ -5,73 +5,36 @@ import pytz
 import re
 import json
 import os 
-from pathlib import Path #Import Pathlib for robust path handling
+from pathlib import Path # Import Pathlib for robust path handling
 
 # --- Configuration ---
 
 # Get the directory of the current Python script
+# NOTE: If running from an IDE, __file__ might behave unexpectedly. 
+# Ensure you run the script from a terminal for the most reliable path.
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # File path for persistent storage, relative to the script's directory
 SCHEDULE_FILE = SCRIPT_DIR / 'reminders.json' 
 
-# 1. Set Intents
-intents = discord.Intents.default()
-intents.members = True   
-intents.message_content = True 
-
-# Initialize the Bot with a command prefix
-BOT_PREFIX = "!"
-client = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
-
-# --- Reminder Storage ---
-# This will be populated from the JSON file on startup
-REMINDERS_LIST = [] 
-
 # Global timezone for all reminders 
 TIMEZONE_STR = 'Asia/Dhaka' 
 BOT_TZ = pytz.timezone(TIMEZONE_STR)
-# Updated reminder times in minutes before the meeting
+
+# Initialize the Bot with a command prefix
+BOT_PREFIX = "!"
+intents = discord.Intents.default()
+intents.members = True   
+intents.message_content = True 
+client = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
+
+# --- Reminder Storage ---
+REMINDERS_LIST = [] 
 REMINDER_INTERVALS = [15, 10, 2, 0] 
 
-
-
 # ----------------------------------------------------------------------
-# 2. JSON Persistence Functions
+# 2. JSON Persistence Functions (Modified Load)
 # ----------------------------------------------------------------------
-
-def load_reminders():
-    """Loads reminders from the JSON file."""
-    global REMINDERS_LIST
-    # 🌟 MODIFIED: os.path.exists() works with Path objects, or you can use SCHEDULE_FILE.exists()
-    if SCHEDULE_FILE.exists(): 
-        with open(SCHEDULE_FILE, 'r') as f:
-            try:
-                data = json.load(f)
-                
-                # Deserialize data back into Python objects (rest of logic unchanged)
-                for item in data:
-                    time_str = item.pop('time') 
-                    item['time'] = datetime.datetime.fromisoformat(time_str).astimezone(BOT_TZ).replace(second=0, microsecond=0)
-                    
-                    confirmed_users_str = item.pop('confirmed_users')
-                    confirmed_users_int = {int(k): v for k, v in confirmed_users_str.items()}
-                    item['confirmed_users'] = confirmed_users_int
-                    
-                    item['users'] = [int(uid) for uid in item['users']]
-                    item['channel_id'] = int(item['channel_id'])
-                    item['scheduler_id'] = int(item['scheduler_id'])
-                    
-                    REMINDERS_LIST.append(item)
-                    
-                print(f"Loaded {len(REMINDERS_LIST)} reminders from {SCHEDULE_FILE.name}.")
-                
-            except json.JSONDecodeError:
-                print(f"Error decoding JSON from {SCHEDULE_FILE.name}. File might be empty or corrupted.")
-                REMINDERS_LIST = []
-    else:
-        print(f"No {SCHEDULE_FILE.name} found. Starting with an empty reminder list.")
-        REMINDERS_LIST = []
 
 def save_reminders():
     """Saves reminders to the JSON file."""
@@ -79,9 +42,11 @@ def save_reminders():
     for reminder in REMINDERS_LIST:
         temp = reminder.copy()
         
+        # Serialization: datetime to string, int keys to string keys
         temp['time'] = temp['time'].isoformat()
         temp['confirmed_users'] = {str(k): v for k, v in temp['confirmed_users'].items()}
         
+        # Ensure all IDs are stored as strings for consistency in the JSON
         temp['users'] = [str(uid) for uid in temp['users']]
         temp['channel_id'] = str(temp['channel_id'])
         temp['scheduler_id'] = str(temp['scheduler_id'])
@@ -90,24 +55,61 @@ def save_reminders():
         
     with open(SCHEDULE_FILE, 'w') as f:
         json.dump(serializable_list, f, indent=4)
-    # print(f"Saved {len(serializable_list)} reminders to {SCHEDULE_FILE.name}.")
+
+
+def load_reminders():
+    """
+    Loads reminders from the JSON file. 
+    Returns a list of reminders that expired while the bot was offline.
+    """
+    global REMINDERS_LIST
+    expired_reminders = []
+    
+    if SCHEDULE_FILE.exists(): 
+        with open(SCHEDULE_FILE, 'r') as f:
+            try:
+                data = json.load(f)
+                now = datetime.datetime.now(BOT_TZ).replace(second=0, microsecond=0)
+                
+                for item in data:
+                    # Deserialization of IDs
+                    item['users'] = [int(uid) for uid in item['users']]
+                    item['channel_id'] = int(item['channel_id'])
+                    item['scheduler_id'] = int(item['scheduler_id'])
+                    
+                    # Deserialization of Time and Confirmed Users
+                    time_str = item.pop('time') 
+                    meeting_time = datetime.datetime.fromisoformat(time_str).astimezone(BOT_TZ).replace(second=0, microsecond=0)
+                    item['time'] = meeting_time
+                    
+                    confirmed_users_str = item.pop('confirmed_users')
+                    confirmed_users_int = {int(k): v for k, v in confirmed_users_str.items()}
+                    item['confirmed_users'] = confirmed_users_int
+                    
+                    # 🌟 NEW LOGIC: Check for expired meetings
+                    # We check if the meeting time is within the last minute or in the past.
+                    if meeting_time < now:
+                        expired_reminders.append(item)
+                    else:
+                        REMINDERS_LIST.append(item) # Only load active meetings
+                    
+                print(f"Loaded {len(REMINDERS_LIST)} active reminders.")
+                print(f"Found {len(expired_reminders)} expired reminders.")
+                
+            except json.JSONDecodeError:
+                print(f"Error decoding JSON from {SCHEDULE_FILE.name}. File might be empty or corrupted.")
+                REMINDERS_LIST = []
+    else:
+        print(f"No {SCHEDULE_FILE.name} found. Starting with an empty reminder list.")
+        
+    return expired_reminders
+
 
 # ----------------------------------------------------------------------
 # 3. Discord Events and Tasks (Modified on_ready)
 # ----------------------------------------------------------------------
 
-@client.event
-async def on_ready():
-    # 🌟 NEW: Load data on startup
-    load_reminders() 
-    
-    print(f'Bot is ready and logged in as {client.user}')
-    print(f'Using Timezone: {TIMEZONE_STR}')
-    reminder_checker.start()
-    await client.change_presence(activity=discord.Game(name=f'{BOT_PREFIX}schedule | {BOT_PREFIX}ok'))
-
-# --- Scheduled Reminder Checker (Unchanged, but relies on loaded data) ---
-
+# Background task: check reminders every minute and send notifications
 @tasks.loop(minutes=1) 
 async def reminder_checker():
     now = datetime.datetime.now(BOT_TZ).replace(second=0, microsecond=0)
@@ -170,14 +172,55 @@ async def reminder_checker():
 
 
     # Clean up finished reminders
+    for reminder in reminders_to_remove:
+        if reminder in REMINDERS_LIST:
+            REMINDERS_LIST.remove(reminder)
+            
     if reminders_to_remove:
-        for reminder in reminders_to_remove:
-            if reminder in REMINDERS_LIST:
-                REMINDERS_LIST.remove(reminder)
-        
-        # 🌟 NEW: Save data after successful removal of finished reminders
+        print(f"Removed {len(reminders_to_remove)} finished reminders.")
+
+
+
+@client.event
+async def on_ready():
+    # 🌟 NEW: Load data and get list of expired reminders
+    expired_reminders = load_reminders()
+    
+    # 🌟 NEW: Process Expired Reminders
+    if expired_reminders:
+        await process_expired_reminders(expired_reminders)
+        # Save after cleanup to remove expired items from the JSON file
         save_reminders() 
-        print(f"Removed {len(reminders_to_remove)} finished reminders and saved changes.")
+    
+    print(f'Bot is ready and logged in as {client.user}')
+    print(f'Using Timezone: {TIMEZONE_STR}')
+    reminder_checker.start()
+    await client.change_presence(activity=discord.Game(name=f'{BOT_PREFIX}schedule | {BOT_PREFIX}ok'))
+
+
+async def process_expired_reminders(expired_reminders):
+    """Sends a message about expired meetings found on startup."""
+    
+    for reminder in expired_reminders:
+        channel = client.get_channel(reminder['channel_id'])
+        if channel:
+            mentions = " ".join([f"<@{uid}>" for uid in reminder['users']])
+            
+            # The time the meeting was scheduled for
+            meeting_time_str = reminder['time'].strftime('%Y-%m-%d %I:%M %p %Z')
+            
+            # Message explaining the missed event
+            message = (
+                f"⚠️ **MISSED MEETING ALERT - Bot Restarted** ⚠️\n"
+                f"The meeting **'{reminder['message']}'** scheduled for `{meeting_time_str}` "
+                f"was missed while the bot was offline.\n"
+                f"**Participants:** {mentions}\n"
+                f"This schedule has been automatically removed."
+            )
+            await channel.send(message)
+    
+    print(f"Successfully notified channels about {len(expired_reminders)} missed meetings.")
+
 
 # ----------------------------------------------------------------------
 # 4. Command Logic (Modified to include save_reminders())
@@ -492,6 +535,6 @@ async def on_command_error(ctx, error):
 
 
 
-# 4. Run the Bot
+# end. Run the Bot
 client.run('Your bot token goes here') 
 # NOTE: Replace 'Your bot token goes here' with your actual bot token to run it.

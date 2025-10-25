@@ -332,15 +332,53 @@ async def list_meetings(ctx):
             f"---------------------------------\n"
         )
         
-    message += f"\nTo cancel a meeting, use: `!cancel <ID>` (e.g., `!cancel 1`)"
+    message += f"\nTo cancel a meeting, use: `!cancel <ID>` (e.g., `!cancel 1`) also you can use `!cancel all` or `!cancel .` to cancel all meetings."
     await ctx.send(message)
 
 
-# --- !CANCEL command (Unchanged) ---
-@client.command(name='cancel', help='Cancels a scheduled meeting. Use !list to find the ID.')
-async def cancel_meeting(ctx, meeting_id: int):
+# --- !CANCEL command (MODIFIED: Added 'all' and '.' options) ---
+@client.command(name='cancel', help='Cancels a scheduled meeting. Use !list to find the ID, or use "!cancel all" or "!cancel ." to cancel all your meetings.')
+async def cancel_meeting(ctx, meeting_id_or_command: str):
     user_id = ctx.author.id
     
+    # Check for 'all' or '.' command
+    if meeting_id_or_command.lower() in ['all', '.']:
+        
+        # Identify all meetings scheduled by the user
+        user_reminders_to_cancel = [r for r in REMINDERS_LIST if r['scheduler_id'] == user_id]
+        
+        if not user_reminders_to_cancel:
+            return await ctx.send("❌ **Cancellation Failed:** You have no active meetings to cancel.")
+            
+        count = 0
+        for reminder in user_reminders_to_cancel:
+            try:
+                # Remove the reminder from the global list
+                REMINDERS_LIST.remove(reminder)
+                count += 1
+            except ValueError:
+                # This should theoretically not happen if REMINDERS_LIST is managed correctly
+                pass
+
+        if count > 0:
+            await ctx.send(
+                f"✅ **Batch Cancellation Complete!**\n"
+                f"Successfully cancelled **{count}** active meetings scheduled by you."
+            )
+        else:
+            await ctx.send("❌ **Cancellation Error:** Could not find and remove any of your active meetings.")
+        
+        return # Exit the command after handling 'all'/''.
+        
+    
+    # Handle single meeting cancellation by ID (Original Logic)
+    
+    try:
+        meeting_id = int(meeting_id_or_command)
+    except ValueError:
+        return await ctx.send(f"❌ **Cancellation Failed:** Invalid input. Use the meeting ID (e.g., `!cancel 1`), or use `!cancel all` / `!cancel .` to cancel everything.")
+
+
     user_reminders = [r for r in REMINDERS_LIST if r['scheduler_id'] == user_id]
     
     if not user_reminders:
@@ -375,7 +413,6 @@ async def on_command_error(ctx, error):
         pass
     else:
         print(f"An unexpected error occurred: {error}")
-
 
 
 
